@@ -4,6 +4,7 @@
    Stage 1: core framework, database + migrations, server config,
             unified slash/prefix command layer, moderation system.
    Stage 2: magical content library, discovery, collections, codex.
+   Stage 3: /setup panels (welcome, goodbye, autorole, rules, logs), custom applications, new /help.
    Sections:  1 Setup   2 Database   3 Helpers   4 Command layer
               5 Moderation   6 Config   7 Info   8 Events
    ========================================================================== */
@@ -16,7 +17,9 @@ try { require('dotenv').config(); } catch { /* dotenv is optional in production 
 const {
   Client, GatewayIntentBits, PermissionFlagsBits: P, EmbedBuilder, SlashCommandBuilder,
   REST, Routes, MessageFlags, Events, ChannelType,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, ChannelSelectMenuBuilder,
+  RoleSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, PermissionsBitField,
+  AttachmentBuilder, Partials,
 } = require('discord.js');
 const Database = require('better-sqlite3');
 
@@ -30,7 +33,10 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.GuildVoiceStates,
   ],
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
 /* ----------------------------- 2. DATABASE ------------------------------- */
@@ -89,6 +95,330 @@ const MIGRATIONS = [
      duplicate INTEGER NOT NULL DEFAULT 0
    );
    CREATE INDEX idx_history_user ON discovery_history (guild_id, user_id, at);`,
+  // Stage 3: setup panels and custom applications
+  `CREATE TABLE settings (
+     guild_id TEXT NOT NULL,
+     key TEXT NOT NULL,
+     value TEXT NOT NULL,
+     PRIMARY KEY (guild_id, key)
+   );
+   CREATE TABLE applications (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     name TEXT NOT NULL COLLATE NOCASE,
+     description TEXT NOT NULL DEFAULT '',
+     review_channel TEXT,
+     reviewer_role TEXT,
+     panel_channel TEXT,
+     panel_message TEXT,
+     max_pending INTEGER NOT NULL DEFAULT 1,
+     accept_msg TEXT NOT NULL DEFAULT '',
+     reject_msg TEXT NOT NULL DEFAULT '',
+     created_at INTEGER NOT NULL,
+     UNIQUE (guild_id, name)
+   );
+   CREATE TABLE application_questions (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     app_id INTEGER NOT NULL REFERENCES applications (id) ON DELETE CASCADE,
+     position INTEGER NOT NULL,
+     label TEXT NOT NULL,
+     style TEXT NOT NULL DEFAULT 'short',
+     required INTEGER NOT NULL DEFAULT 1
+   );
+   CREATE INDEX idx_appq ON application_questions (app_id, position);
+   CREATE TABLE application_submissions (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     app_id INTEGER NOT NULL,
+     app_name TEXT NOT NULL,
+     user_id TEXT NOT NULL,
+     answers TEXT NOT NULL,
+     status TEXT NOT NULL DEFAULT 'pending',
+     channel_id TEXT,
+     message_id TEXT,
+     reviewer_id TEXT,
+     note TEXT,
+     created_at INTEGER NOT NULL,
+     reviewed_at INTEGER
+   );
+   CREATE INDEX idx_sub_user ON application_submissions (guild_id, user_id, app_id, status);`,
+  // Stage 4: tickets
+  `CREATE TABLE ticket_categories (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     name TEXT NOT NULL COLLATE NOCASE,
+     description TEXT NOT NULL DEFAULT '',
+     support_role TEXT,
+     parent_channel TEXT,
+     max_open INTEGER NOT NULL DEFAULT 1,
+     welcome_msg TEXT NOT NULL DEFAULT '',
+     close_msg TEXT NOT NULL DEFAULT '',
+     questions TEXT NOT NULL DEFAULT '[]',
+     UNIQUE (guild_id, name)
+   );
+   CREATE TABLE tickets (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     num INTEGER NOT NULL,
+     category_id INTEGER,
+     category_name TEXT NOT NULL,
+     user_id TEXT NOT NULL,
+     channel_id TEXT,
+     status TEXT NOT NULL DEFAULT 'open',
+     claimed_by TEXT,
+     answers TEXT NOT NULL DEFAULT '[]',
+     transcript TEXT,
+     created_at INTEGER NOT NULL,
+     closed_at INTEGER,
+     closed_by TEXT,
+     UNIQUE (guild_id, num)
+   );
+   CREATE INDEX idx_tickets_channel ON tickets (channel_id);
+   CREATE INDEX idx_tickets_user ON tickets (guild_id, user_id, category_id, status);
+   CREATE TABLE ticket_blacklist (
+     guild_id TEXT NOT NULL,
+     user_id TEXT NOT NULL,
+     reason TEXT NOT NULL DEFAULT '',
+     at INTEGER NOT NULL,
+     PRIMARY KEY (guild_id, user_id)
+   );`,
+  // Stage 4: staff
+  `CREATE TABLE staff_records (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     user_id TEXT NOT NULL,
+     type TEXT NOT NULL,
+     detail TEXT NOT NULL,
+     by_id TEXT NOT NULL,
+     at INTEGER NOT NULL
+   );
+   CREATE INDEX idx_staff_records ON staff_records (guild_id, user_id, at);
+   CREATE TABLE staff_activity (
+     guild_id TEXT NOT NULL,
+     user_id TEXT NOT NULL,
+     day TEXT NOT NULL,
+     msgs INTEGER NOT NULL DEFAULT 0,
+     PRIMARY KEY (guild_id, user_id, day)
+   );
+   CREATE TABLE leaves (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     user_id TEXT NOT NULL,
+     reason TEXT NOT NULL,
+     end_at INTEGER NOT NULL,
+     status TEXT NOT NULL DEFAULT 'pending',
+     reviewer_id TEXT,
+     created_at INTEGER NOT NULL
+   );
+   CREATE INDEX idx_leaves ON leaves (status, end_at);
+   CREATE TABLE reports (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     reporter_id TEXT NOT NULL,
+     target_id TEXT,
+     reason TEXT NOT NULL,
+     anonymous INTEGER NOT NULL DEFAULT 0,
+     channel_id TEXT,
+     message_id TEXT,
+     created_at INTEGER NOT NULL
+   );`,
+  // Stage 4: giveaways, events, trivia
+  `CREATE TABLE giveaways (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     channel_id TEXT NOT NULL,
+     message_id TEXT,
+     prize TEXT NOT NULL,
+     winners INTEGER NOT NULL DEFAULT 1,
+     ends_at INTEGER NOT NULL,
+     status TEXT NOT NULL DEFAULT 'active',
+     host_id TEXT NOT NULL,
+     req_role TEXT,
+     winner_ids TEXT NOT NULL DEFAULT '[]',
+     created_at INTEGER NOT NULL
+   );
+   CREATE INDEX idx_giveaways ON giveaways (status, ends_at);
+   CREATE TABLE giveaway_entries (
+     giveaway_id INTEGER NOT NULL,
+     user_id TEXT NOT NULL,
+     PRIMARY KEY (giveaway_id, user_id)
+   );
+   CREATE TABLE events (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     title TEXT NOT NULL,
+     description TEXT NOT NULL DEFAULT '',
+     kind TEXT NOT NULL DEFAULT 'event',
+     starts_at INTEGER NOT NULL,
+     channel_id TEXT NOT NULL,
+     message_id TEXT,
+     status TEXT NOT NULL DEFAULT 'scheduled',
+     reminded INTEGER NOT NULL DEFAULT 0,
+     creator_id TEXT NOT NULL,
+     created_at INTEGER NOT NULL
+   );
+   CREATE INDEX idx_events ON events (status, starts_at);
+   CREATE TABLE event_joins (
+     event_id INTEGER NOT NULL,
+     user_id TEXT NOT NULL,
+     at INTEGER NOT NULL,
+     PRIMARY KEY (event_id, user_id)
+   );
+   CREATE TABLE trivia_bank (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     question TEXT NOT NULL,
+     answer TEXT NOT NULL,
+     alts TEXT NOT NULL DEFAULT ''
+   );
+   CREATE INDEX idx_trivia_bank ON trivia_bank (guild_id);
+   CREATE TABLE trivia_scores (
+     guild_id TEXT NOT NULL,
+     user_id TEXT NOT NULL,
+     points INTEGER NOT NULL DEFAULT 0,
+     PRIMARY KEY (guild_id, user_id)
+   );`,
+  // Stage 4: community
+  `CREATE TABLE anon_posts (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     kind TEXT NOT NULL,
+     user_id TEXT NOT NULL,
+     content TEXT NOT NULL,
+     message_id TEXT,
+     created_at INTEGER NOT NULL
+   );
+   CREATE TABLE suggestions (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     user_id TEXT NOT NULL,
+     content TEXT NOT NULL,
+     channel_id TEXT,
+     message_id TEXT,
+     status TEXT NOT NULL DEFAULT 'pending',
+     note TEXT NOT NULL DEFAULT '',
+     created_at INTEGER NOT NULL
+   );
+   CREATE TABLE suggestion_votes (
+     suggestion_id INTEGER NOT NULL,
+     user_id TEXT NOT NULL,
+     vote INTEGER NOT NULL,
+     PRIMARY KEY (suggestion_id, user_id)
+   );
+   CREATE TABLE polls (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     channel_id TEXT NOT NULL,
+     message_id TEXT,
+     question TEXT NOT NULL,
+     options TEXT NOT NULL,
+     ends_at INTEGER,
+     status TEXT NOT NULL DEFAULT 'open',
+     kind TEXT NOT NULL DEFAULT 'poll',
+     creator_id TEXT NOT NULL,
+     created_at INTEGER NOT NULL
+   );
+   CREATE INDEX idx_polls ON polls (status, ends_at);
+   CREATE TABLE poll_votes (
+     poll_id INTEGER NOT NULL,
+     user_id TEXT NOT NULL,
+     choice INTEGER NOT NULL,
+     PRIMARY KEY (poll_id, user_id)
+   );
+   CREATE TABLE prompts (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     kind TEXT NOT NULL,
+     text TEXT NOT NULL
+   );
+   CREATE INDEX idx_prompts ON prompts (guild_id, kind);
+   CREATE TABLE awards (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     user_id TEXT NOT NULL,
+     title TEXT NOT NULL,
+     reason TEXT NOT NULL DEFAULT '',
+     by_id TEXT NOT NULL,
+     at INTEGER NOT NULL
+   );
+   CREATE INDEX idx_awards ON awards (guild_id, user_id);
+   CREATE TABLE motm (
+     guild_id TEXT NOT NULL,
+     month TEXT NOT NULL,
+     user_id TEXT NOT NULL,
+     reason TEXT NOT NULL DEFAULT '',
+     by_id TEXT NOT NULL,
+     PRIMARY KEY (guild_id, month)
+   );
+   CREATE TABLE birthdays (
+     guild_id TEXT NOT NULL,
+     user_id TEXT NOT NULL,
+     day INTEGER NOT NULL,
+     month INTEGER NOT NULL,
+     PRIMARY KEY (guild_id, user_id)
+   );
+   CREATE INDEX idx_birthdays ON birthdays (guild_id, month, day);
+   CREATE TABLE activity (
+     guild_id TEXT NOT NULL,
+     day TEXT NOT NULL,
+     msgs INTEGER NOT NULL DEFAULT 0,
+     joins INTEGER NOT NULL DEFAULT 0,
+     leaves INTEGER NOT NULL DEFAULT 0,
+     PRIMARY KEY (guild_id, day)
+   );
+   CREATE TABLE verifications (
+     guild_id TEXT NOT NULL,
+     user_id TEXT NOT NULL,
+     at INTEGER NOT NULL,
+     PRIMARY KEY (guild_id, user_id)
+   );`,
+  // Stage 4: role menus
+  `CREATE TABLE role_menus (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     name TEXT NOT NULL,
+     description TEXT NOT NULL DEFAULT '',
+     kind TEXT NOT NULL,
+     channel_id TEXT,
+     message_id TEXT,
+     roles TEXT NOT NULL DEFAULT '[]'
+   );
+   CREATE INDEX idx_role_menus ON role_menus (guild_id);
+   CREATE INDEX idx_role_menus_msg ON role_menus (message_id);`,
+  // Stage 4: fun and custom content
+  `CREATE TABLE daily_claims (
+     guild_id TEXT NOT NULL,
+     user_id TEXT NOT NULL,
+     last_day TEXT NOT NULL,
+     streak INTEGER NOT NULL DEFAULT 1,
+     total INTEGER NOT NULL DEFAULT 1,
+     PRIMARY KEY (guild_id, user_id)
+   );
+   CREATE TABLE duel_stats (
+     guild_id TEXT NOT NULL,
+     user_id TEXT NOT NULL,
+     wins INTEGER NOT NULL DEFAULT 0,
+     losses INTEGER NOT NULL DEFAULT 0,
+     PRIMARY KEY (guild_id, user_id)
+   );
+   CREATE TABLE house_members (
+     guild_id TEXT NOT NULL,
+     user_id TEXT NOT NULL,
+     house INTEGER NOT NULL,
+     at INTEGER NOT NULL,
+     PRIMARY KEY (guild_id, user_id)
+   );
+   CREATE TABLE custom_content (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     cat TEXT NOT NULL,
+     name TEXT NOT NULL COLLATE NOCASE,
+     rarity TEXT NOT NULL,
+     description TEXT NOT NULL,
+     effect TEXT NOT NULL,
+     created_at INTEGER NOT NULL,
+     UNIQUE (guild_id, name)
+   );`,
 ];
 {
   const current = db.pragma('user_version', { simple: true });
@@ -759,6 +1089,10 @@ define({
         )] });
       },
     },
+    features: {
+      description: 'Show the status of every feature',
+      async run(ctx) { await ctx.reply({ embeds: [embed(ctx.cfg, Object.keys(FEATURES).map((k) => `**${capital(k)}** · ${setupStatus(ctx.guild.id, k)}`).join('\n')).setTitle('Features').setFooter({ text: `${FOOTER} · Change any of these with /setup` })] }); },
+    },
     color: {
       description: 'Set the embed color',
       options: [opt('string', 'hex', 'Hex color such as #2b2540', true, { maxLength: 7 })],
@@ -805,16 +1139,6 @@ define({
       { name: 'Roles', value: String(g.roles.cache.size), inline: true },
       { name: 'Boosts', value: String(g.premiumSubscriptionCount || 0), inline: true },
     )] });
-  },
-});
-define({
-  name: 'help', description: 'List available commands', category: 'Utility',
-  async run(ctx) {
-    const by = {};
-    for (const c of commands) (by[c.category] ||= []).push(c);
-    const e = embed(ctx.cfg).setTitle('Wands of Fate').setDescription(`Prefix: \`${ctx.cfg.prefix}\` · Slash commands use \`/\``);
-    for (const [cat, list] of Object.entries(by)) e.addFields({ name: cat, value: list.map((c) => `\`${c.name}\``).join(' ') });
-    await ctx.reply({ embeds: [e] });
   },
 });
 
@@ -1214,9 +1538,9 @@ function recordDiscovery(guildId, userId, item) {
 }
 
 const discoverCooldown = new Map();
-function checkCooldown(userId) {
+function checkCooldown(userId, secs = 5) {
   const now = Date.now();
-  const wait = 5000 - (now - (discoverCooldown.get(userId) || 0));
+  const wait = secs * 1000 - (now - (discoverCooldown.get(userId) || 0));
   if (wait > 0) throw new UserError(`Give the air a moment to settle. Try again in ${Math.ceil(wait / 1000)}s.`);
   discoverCooldown.set(userId, now);
   if (discoverCooldown.size > 5000) for (const [k, v] of discoverCooldown) if (now - v > 60000) discoverCooldown.delete(k);
@@ -1226,8 +1550,10 @@ const againRow = (userId, cat) => new ActionRowBuilder().addComponents(
   new ButtonBuilder().setCustomId(`dc:${userId}`).setLabel('My collection').setStyle(ButtonStyle.Secondary),
 );
 function discoverPayload(guildId, userId, cat) {
-  checkCooldown(userId);
-  const item = pickDiscovery(cat);
+  const ms = getSetting(guildId, 'magic', {});
+  if (ms.enabled === false) throw new UserError('Discovery is switched off in this server.');
+  checkCooldown(userId, ms.cooldown === undefined ? 5 : ms.cooldown);
+  const item = pickDiscoveryFor(guildId, cat);
   const rec = recordDiscovery(guildId, userId, item);
   const note = rec.qty > 1 ? `Duplicate · you now hold ${rec.qty}` : `New discovery · ${rec.unique} in your collection`;
   return { embeds: [itemEmbed(item, note)], components: [againRow(userId, cat)] };
@@ -1282,7 +1608,7 @@ async function renderBrowser(st) {
   if (codex) {
     const mine = new Set(db.prepare('SELECT item_id FROM collection WHERE guild_id = ? AND user_id = ? AND cat = ?')
       .all(st.guildId, st.viewer, st.cat).map((r) => r.item_id));
-    entries = BY_CAT[st.cat].map((i) => ({ id: i.id, name: i.name, rarity: i.rarity, cat: i.cat, found: mine.has(i.id) }));
+    entries = [...BY_CAT[st.cat], ...customItems(st.guildId).filter((x) => x.cat === st.cat)].map((i) => ({ id: i.id, name: i.name, rarity: i.rarity, cat: i.cat, found: mine.has(i.id) }));
   } else {
     const rows = st.cat === 'all'
       ? db.prepare('SELECT * FROM collection WHERE guild_id = ? AND user_id = ?').all(st.guildId, st.target)
@@ -1306,7 +1632,7 @@ async function renderBrowser(st) {
       slice.map((x) => `**${x.name}** · ${x.rarity}${x.found ? ' · found' : ''}`).join('\n'));
   } else {
     const user = await client.users.fetch(st.target).catch(() => null);
-    const total = st.cat === 'all' ? LIB.size : BY_CAT[st.cat].length;
+    const total = (st.cat === 'all' ? LIB.size : BY_CAT[st.cat].length) + customItems(st.guildId).filter((x) => st.cat === 'all' || x.cat === st.cat).length;
     e.setTitle(`${user ? user.username : 'Member'}'s ${st.cat === 'all' ? 'collection' : catLabel(st.cat).toLowerCase()}`);
     e.setDescription(entries.length
       ? `${entries.length} of ${total} discovered.\n\n` + slice.map((x) => `**${x.name}** · ${x.rarity}${x.qty > 1 ? ` · x${x.qty}` : ''}`).join('\n')
@@ -1325,173 +1651,4 @@ async function renderBrowser(st) {
   if (slice.length) {
     rows.push(new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(browseId('be', cur))
       .setPlaceholder('Read an entry').addOptions(slice.map((x) => ({
-        label: clip(x.name, 100), description: `${x.rarity} · ${catLabel(x.cat)}`, value: x.id,
-      })))));
-  }
-  const flip = st.sort === 'x' ? 'n' : 'x';
-  rows.push(new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(browseId('bpp', cur, { page: Math.max(0, page - 1) })).setLabel('Previous').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
-    new ButtonBuilder().setCustomId(`noop:${page}`).setLabel(`${page + 1}/${pages}`).setStyle(ButtonStyle.Secondary).setDisabled(true),
-    new ButtonBuilder().setCustomId(browseId('bpn', cur, { page: Math.min(pages - 1, page + 1) })).setLabel('Next').setStyle(ButtonStyle.Secondary).setDisabled(page >= pages - 1),
-    new ButtonBuilder().setCustomId(browseId('bps', cur, { page: 0, sort: flip })).setLabel(SORT_LABEL[st.mode][st.sort]).setStyle(ButtonStyle.Primary),
-  ));
-  return { embeds: [e], components: rows };
-}
-function detailPayload(st, itemId) {
-  const owner = st.mode === 'x' ? st.viewer : st.target;
-  const row = db.prepare('SELECT * FROM collection WHERE guild_id = ? AND user_id = ? AND item_id = ?').get(st.guildId, owner, itemId);
-  const lib = LIB.get(itemId);
-  let e;
-  if (lib && !row) {
-    e = new EmbedBuilder().setColor(rarityColor(lib.rarity)).setTitle(lib.name)
-      .setDescription('You have not discovered this entry yet. Its description stays hidden until you find it.')
-      .addFields({ name: 'Category', value: catLabel(lib.cat), inline: true }, { name: 'Rarity', value: lib.rarity, inline: true })
-      .setFooter({ text: `${FOOTER} · Undiscovered` });
-  } else {
-    const item = lib || { cat: row.cat, name: row.name, rarity: row.rarity, desc: 'This entry has since been retired from the archives.', effect: 'None recorded.', attr: 'None recorded.' };
-    e = itemEmbed(item, row ? `Discovered ${row.qty > 1 ? `${row.qty} times` : 'once'}` : 'Archive entry');
-  }
-  const back = new ButtonBuilder().setCustomId(browseId('bb', st)).setLabel('Back').setStyle(ButtonStyle.Secondary);
-  return { embeds: [e], components: [new ActionRowBuilder().addComponents(back)] };
-}
-const startBrowser = async (ctx, mode, cat, target) => ctx.reply(await renderBrowser({
-  guildId: ctx.guild.id, mode, viewer: ctx.user.id, target: target.id, cat, page: 0, sort: 'n',
-}));
-define({
-  name: 'collection', description: 'View your discoveries (or another member\'s)', category: 'Discovery',
-  options: [opt('user', 'member', 'Member (defaults to you)')],
-  run: (ctx, a) => startBrowser(ctx, 'c', 'all', a.member || ctx.user),
-});
-define({
-  name: 'spellbook', description: 'Browse the spells you have discovered', category: 'Discovery',
-  options: [opt('user', 'member', 'Member (defaults to you)')],
-  run: (ctx, a) => startBrowser(ctx, 'c', 'spell', a.member || ctx.user),
-});
-define({
-  name: 'codex', description: 'Browse the magical encyclopedia', category: 'Discovery',
-  options: [opt('string', 'category', 'Category (defaults to spells)', false, { choices: Object.keys(CATS) })],
-  run: (ctx, a) => startBrowser(ctx, 'x', a.category || 'spell', ctx.user),
-});
-
-client.on(Events.InteractionCreate, async (i) => {
-  if (!i.guild || !(i.isButton() || i.isStringSelectMenu())) return;
-  const parts = i.customId.split(':');
-  const kind = parts[0];
-  if (!['bs', 'be', 'bb', 'bpp', 'bpn', 'bps', 'da', 'dc'].includes(kind)) return;
-  try {
-    const owner = kind === 'da' || kind === 'dc' ? parts[1] : parts[2];
-    if (i.user.id !== owner) {
-      return await i.reply({ embeds: [failEmbed('This panel belongs to someone else. Run the command yourself to get your own.')], flags: MessageFlags.Ephemeral });
-    }
-    if (kind === 'da') {
-      const cat = parts[2];
-      if (cat !== 'any' && cat !== 'fortune' && !CATS[cat]) return;
-      return await i.reply(cat === 'fortune' ? fortunePayload(getConfig(i.guild.id), i.user.id)
-        : discoverPayload(i.guild.id, i.user.id, cat === 'any' ? null : cat));
-    }
-    if (kind === 'dc') {
-      const st = { guildId: i.guild.id, mode: 'c', viewer: i.user.id, target: i.user.id, cat: 'all', page: 0, sort: 'n' };
-      return await i.reply({ ...(await renderBrowser(st)), flags: MessageFlags.Ephemeral });
-    }
-    const st = {
-      guildId: i.guild.id, mode: parts[1] === 'x' ? 'x' : 'c', viewer: parts[2], target: parts[3],
-      cat: parts[4], page: parseInt(parts[5], 10) || 0, sort: parts[6] === 'x' ? 'x' : 'n',
-    };
-    if (st.cat !== 'all' && !CATS[st.cat]) st.cat = st.mode === 'x' ? 'spell' : 'all';
-    if (st.mode === 'x' && st.cat === 'all') st.cat = 'spell';
-    if (kind === 'bs') {
-      st.cat = i.values[0];
-      st.page = 0;
-      if (st.cat !== 'all' && !CATS[st.cat]) return;
-      return await i.update(await renderBrowser(st));
-    }
-    if (kind === 'be') return await i.update(detailPayload(st, i.values[0]));
-    return await i.update(await renderBrowser(st)); // bb, bpp, bpn, bps
-  } catch (err) {
-    if (!(err instanceof UserError)) console.error('Component error:', err);
-    const body = { embeds: [failEmbed(err instanceof UserError ? err.message : 'That did not work. The error has been logged.')], flags: MessageFlags.Ephemeral };
-    (i.replied || i.deferred ? i.followUp(body) : i.reply(body)).catch(() => {});
-  }
-});
-
-
-/* ------------------------------- 8. EVENTS -------------------------------- */
-async function registerCommands() {
-  const rest = new REST({ version: '10' }).setToken(TOKEN);
-  const body = commands.map(buildSlash);
-  const route = process.env.DEV_GUILD_ID
-    ? Routes.applicationGuildCommands(client.user.id, process.env.DEV_GUILD_ID)
-    : Routes.applicationCommands(client.user.id);
-  await rest.put(route, { body });
-  console.log(`Registered ${body.length} slash commands${process.env.DEV_GUILD_ID ? ' to the dev guild' : ' globally'}.`);
-}
-
-// Expire temporary bans and timeouts.
-async function sweepExpired() {
-  const rows = db.prepare("SELECT * FROM cases WHERE active=1 AND expires_at IS NOT NULL AND expires_at <= ? AND type IN ('tempban','mute')").all(Date.now());
-  for (const r of rows) {
-    if (r.type === 'tempban') {
-      const g = client.guilds.cache.get(r.guild_id);
-      if (!g) continue;
-      await g.bans.remove(r.user_id, 'Temporary ban expired').catch(() => {});
-      createCase(g, 'unban', r.user_id, client.user.id, `Temporary ban from case #${r.num} expired`);
-    }
-    db.prepare('UPDATE cases SET active = 0 WHERE id = ?').run(r.id);
-  }
-}
-
-client.once(Events.ClientReady, async () => {
-  console.log(`Logged in as ${client.user.tag}`);
-  try { await registerCommands(); } catch (e) { console.error('Slash registration failed:', e); }
-  setInterval(() => sweepExpired().catch((e) => console.error('Expiry sweep failed:', e)), 30e3);
-  sweepExpired().catch(() => {});
-});
-client.on(Events.GuildCreate, (g) => getConfig(g.id));
-
-client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-  const cmd = lookup.get(interaction.commandName);
-  if (!cmd || !interaction.guild) return;
-  const sub = cmd.subs ? interaction.options.getSubcommand() : null;
-  const ctx = new Ctx({ interaction, cmd, sub, cfg: getConfig(interaction.guild.id) });
-  try {
-    ctx.args = slashArgs(interaction, (sub ? cmd.subs[sub] : cmd).options || []);
-    await execute(ctx);
-  } catch (err) { await handleError(ctx, err); }
-});
-
-client.on(Events.MessageCreate, async (message) => {
-  if (message.author.bot || !message.guild) return;
-  const cfg = getConfig(message.guild.id);
-  if (!message.content.startsWith(cfg.prefix)) return;
-  const tokens = message.content.slice(cfg.prefix.length).trim().split(/\s+/);
-  const cmd = lookup.get((tokens.shift() || '').toLowerCase());
-  if (!cmd) return;
-  if (!message.member) message.member = await message.guild.members.fetch(message.author.id).catch(() => null);
-  if (!message.member) return;
-  let sub = null;
-  const ctx = new Ctx({ message, cmd, cfg });
-  try {
-    if (cmd.subs) {
-      sub = (tokens.shift() || '').toLowerCase();
-      if (!cmd.subs[sub]) throw new UserError(`Use one of: ${Object.keys(cmd.subs).map((s) => `\`${cfg.prefix}${cmd.name} ${s}\``).join(', ')}`);
-      ctx.sub = sub;
-    }
-    ctx.args = await prefixArgs(sub ? cmd.subs[sub] : cmd, tokens, message.guild, usageOf(cfg.prefix, cmd, sub));
-    await execute(ctx);
-  } catch (err) { await handleError(ctx, err); }
-});
-
-client.on(Events.Error, (e) => console.error('Client error:', e));
-client.on(Events.ShardError, (e) => console.error('Shard error:', e));
-process.on('unhandledRejection', (e) => console.error('Unhandled rejection:', e));
-process.on('uncaughtException', (e) => console.error('Uncaught exception:', e));
-process.on('SIGTERM', () => { client.destroy(); db.close(); process.exit(0); });
-
-console.log('Starting Wands of Fate...');
-console.log(`Database folder: ${dataDir}`);
-console.log(`Loaded ${LIB.size} magical entries and ${commands.length} commands.`);
-client.login(TOKEN).catch((err) => {
-  console.error('Login failed:', err.message);
-  process.exit(1);
-});
+        label: clip(x.name, 100), d

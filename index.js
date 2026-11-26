@@ -1645,7 +1645,7 @@ function discoverPayload(guildId, userId, cat, member) {
   const ms = getSetting(guildId, 'magic', {});
   if (ms.enabled === false) throw new UserError('Discovery is switched off in this server.');
   const pk = perksOf(guildId, member);
-  checkCooldown(userId, pk && pk.cooldown !== undefined ? pk.cooldown : (ms.cooldown === undefined ? 5 : ms.cooldown));
+  checkCooldown(userId, pk && pk.cooldown !== undefined ? pk.cooldown : (ms.cooldown === undefined ? 30 : ms.cooldown));
   const item = pickLucky(guildId, cat, pk ? pk.luck : 0);
   const rec = recordDiscovery(guildId, userId, item);
   const gain = rec.qty === 1 ? earn(guildId, member, econ(guildId).discovery_coins || 0) : 0;
@@ -4465,7 +4465,7 @@ simpleFeature('magic', {
   blurb: 'Custom entries join the discovery pool in this server only. They appear in /discover, /collection and /codex.',
   fields: [
     { k: 'enabled', label: 'Discovery enabled', type: 'toggle', def: true },
-    { k: 'cooldown', label: 'Cooldown between discoveries', type: 'number', min: 0, max: 3600, def: 5, unit: 'seconds' },
+    { k: 'cooldown', label: 'Cooldown between discoveries', type: 'number', min: 0, max: 3600, def: 30, unit: 'seconds' },
     { k: 'daily', label: 'Daily reward enabled', type: 'toggle', def: true },
   ],
   actions: [
@@ -5162,6 +5162,7 @@ simpleFeature('highrank', {
     { k: 'coin_boost', label: 'Coin earning boost', type: 'number', min: 100, max: 500, def: 100, unit: '% of normal' },
     { k: 'cooldown', label: 'Discovery cooldown', type: 'number', min: 0, max: 3600, unit: 'seconds' },
     { k: 'vault', label: 'Vault access', type: 'toggle', def: true },
+    { k: 'mythic_roles', label: 'Roles that can claim mythics', type: 'roles', max: 5, hint: 'Administrators can always use /mythic' },
   ],
 });
 function perksOf(gid, member) {
@@ -5270,6 +5271,22 @@ define({
           { name: 'Shop', value: 'Rank-only wares', inline: true })], allowedMentions: { parse: [] } });
       },
     },
+  },
+});
+
+// Mythic access: administrators, plus any roles chosen in /setup highrank, can claim a Mythical discovery whenever they like (no cooldown)
+define({
+  name: 'mythic', description: 'Claim a Mythical discovery (administrators and chosen roles)', category: 'Magic',
+  options: [opt('string', 'category', 'What kind of Mythical to claim (random if omitted)', false, { choices: Object.keys(CATS) })],
+  async run(ctx, a) {
+    const gid = ctx.guild.id, h = getSetting(gid, 'highrank', {});
+    const allowed = ctx.member.permissions.has(P.Administrator) || (h.mythic_roles || []).some((r) => ctx.member.roles.cache.has(r));
+    if (!allowed) throw new UserError('Only administrators and the roles chosen in /setup highrank can claim mythics.');
+    const cat = a.category || null;
+    const pool = [...(POOL[`${cat || 'all'}|Mythical`] || []), ...customItems(gid).filter((x) => x.rarity === 'Mythical' && (!cat || x.cat === cat))];
+    if (!pool.length) throw new UserError('There is no Mythical entry in that category yet. Try another category or leave it empty.');
+    const item = randomOf(pool), rec = recordDiscovery(gid, ctx.user.id, item);
+    await ctx.reply({ embeds: [itemEmbed(item, `Mythic claim${rec.qty > 1 ? ` · duplicate, you hold ${rec.qty}` : ' · new discovery'}`)], components: [actionRow(button(`dc:${ctx.user.id}`, 'My collection'))] });
   },
 });
 

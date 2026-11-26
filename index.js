@@ -2915,6 +2915,47 @@ async function extraPanelModal(i, action, args) {
 
 const fillTicket = (t, user, c) => t.replaceAll('{user}', `<@${user.id}>`).replaceAll('{category}', c.name);
 const isStaffFor = (member, cat) => member.permissions.has(P.ManageChannels) || !!(cat && catRoleIds(cat).some((r) => member.roles.cache.has(r)));
+// Opening message of a ticket: rebuilt from the ticket row so it can show who claimed it and flip the Claim button.
+const ticketButtons = (tid, claimed) => actionRow(
+  button(`tk:close:${tid}`, 'Close', ButtonStyle.Danger),
+  button(`tk:claim:${tid}`, claimed ? 'Unclaim' : 'Claim', claimed ? ButtonStyle.Primary : ButtonStyle.Success),
+);
+async function ticketOpenMessage(g, t, cat) {
+  const name = cat ? cat.name : t.category_name;
+  const claimed = t.status === 'open' && !!t.claimed_by;
+  const roles = cat ? catRoleIds(cat).filter((r) => g.roles.cache.has(r)) : [];
+  let answers = [];
+  try { answers = JSON.parse(t.answers || '[]'); } catch { answers = []; }
+  const status = t.status === 'open' ? (claimed ? `🟡 Claimed by <@${t.claimed_by}>` : '🟢 Open · waiting for staff') : '🔴 Closed';
+  const e = embed(getConfig(g.id))
+    .setTitle(`🎫 ${name} · Ticket ${pad(t.num)}`)
+    .setDescription(`${cat && cat.welcome_msg ? fillTicket(cat.welcome_msg, { id: t.user_id }, cat) : 'Describe what you need and a staff member will reply here.'}\n\u200b`)
+    .addFields(
+      { name: '👤 Opened by', value: `<@${t.user_id}>`, inline: true },
+      { name: '🕒 Opened', value: `<t:${Math.floor(t.created_at / 1000)}:R>`, inline: true },
+      { name: '📌 Status', value: status, inline: true },
+    )
+    .setFooter({ text: `${FOOTER} · Ticket ${pad(t.num)}` }).setTimestamp(t.created_at);
+  if (roles.length) e.addFields({ name: '🛡️ Support team', value: roles.map((r) => `<@&${r}>`).join(' ') });
+  const qs = cat ? catQuestions(cat) : [];
+  qs.forEach((q, n) => {
+    if (!answers[n]) return;
+    e.addFields({ name: clip(`${n + 1}. ${q}`, 256), value: clip(answers[n], 900).split('\n').map((l) => `> ${l}`).join('\n') });
+  });
+  if (claimed) e.setColor(0x57f287);
+  const u = await g.client.users.fetch(t.user_id).catch(() => null);
+  if (u) e.setThumbnail(u.displayAvatarURL());
+  return { embeds: [e], components: [ticketButtons(t.id, claimed)] };
+}
+async function syncTicketMessage(g, t) {
+  const ch = t.channel_id && g.channels.cache.get(t.channel_id);
+  if (!ch) return;
+  const first = await ch.messages.fetch({ limit: 5, after: '0' }).catch(() => null);
+  const msg = first && [...first.values()].find((m) => m.author.id === g.client.user.id && m.components.some((r) => r.components.some((c) => c.customId === `tk:claim:${t.id}`)));
+  if (!msg) return;
+  const cat = t.category_id ? getCat(t.category_id, g.id) : null;
+  await msg.edit(await ticketOpenMessage(g, t, cat)).catch(() => {});
+}
 async function createTicket(i, cat) {
   const g = i.guild, answers = i.__answers || [];
   const num = db.prepare('SELECT COALESCE(MAX(num), 0) + 1 AS n FROM tickets WHERE guild_id = ?').get(g.id).n;
@@ -2933,13 +2974,9 @@ async function createTicket(i, cat) {
       permissionOverwrites: overwrites, topic: `${cat.name} · opened by ${i.user.username} (${i.user.id})`,
     });
     db.prepare('UPDATE tickets SET channel_id = ? WHERE id = ?').run(ch.id, tid);
-    const e = embed(getConfig(g.id)).setTitle(cat.name)
-      .setDescription(cat.welcome_msg ? fillTicket(cat.welcome_msg, i.user, cat) : 'Describe what you need and a staff member will reply here.')
-      .setFooter({ text: `${FOOTER} · Ticket ${pad(num)}` });
-    catQuestions(cat).forEach((q, n) => { if (answers[n]) e.addFields({ name: clip(q, 256), value: clip(answers[n], 1000) }); });
+    const opening = await ticketOpenMessage(g, db.prepare('SELECT * FROM tickets WHERE id = ?').get(tid), cat);
     await ch.send({
-      content: `<@${i.user.id}>${roles.map((r) => ` <@&${r.id}>`).join('')}`, embeds: [e],
-      components: [actionRow(button(`tk:close:${tid}`, 'Close', ButtonStyle.Danger), button(`tk:claim:${tid}`, 'Claim'))],
+      content: `<@${i.user.id}>${roles.map((r) => ` <@&${r.id}>`).join('')}`, ...opening,
       allowedMentions: { users: [i.user.id], roles: roles.map((r) => r.id) },
     });
     return ch;
@@ -3029,9 +3066,11 @@ route('tk', async (i, p) => {
   }
   if (!staff) throw new UserError('Only staff can do that.');
   if (act === 'claim') {
-    if (t.claimed_by) throw new UserError(`Already claimed by <@${t.claimed_by}>.`);
-    db.prepare('UPDATE tickets SET claimed_by = ? WHERE id = ?').run(i.user.id, t.id);
-    return i.reply({ embeds: [embed(getConfig(g.id), `<@${i.user.id}> claimed this ticket.`)], allowedMentions: { parse: [] } });
+    const un = !!t.claimed_by;
+    if (un && t.claimed_by !== i.user.id && !i.member.permissions.has(P.ManageChannels)) throw new UserError(`Only <@${t.claimed_by}> or a member with Manage Channels can unclaim this ticket.`);
+    db.prepare('UPDATE tickets SET claimed_by = ? WHERE id = ?').run(un ? null : i.user.id, t.id);
+    await i.update(await ticketOpenMessage(g, ticketOf(t.id, g.id), cat));
+    return i.followUp({ embeds: [embed(getConfig(g.id), un ? `<@${i.user.id}> unclaimed this ticket. Any staff member can claim it now.` : `<@${i.user.id}> claimed this ticket.`)], allowedMentions: { parse: [] } });
   }
   if (act === 'reopen') {
     if (t.status !== 'closed') throw new UserError('This ticket is not closed.');
@@ -3091,9 +3130,11 @@ define({
       description: 'Claim this ticket',
       async run(ctx) {
         const t = ticketHere(ctx); staffHere(ctx, t);
-        if (t.claimed_by) throw new UserError(`Already claimed by <@${t.claimed_by}>.`);
-        db.prepare('UPDATE tickets SET claimed_by = ? WHERE id = ?').run(ctx.user.id, t.id);
-        await ctx.ok(`<@${ctx.user.id}> claimed this ticket.`);
+        const un = !!t.claimed_by;
+        if (un && t.claimed_by !== ctx.user.id && !ctx.member.permissions.has(P.ManageChannels)) throw new UserError(`Only <@${t.claimed_by}> or a member with Manage Channels can unclaim this ticket.`);
+        db.prepare('UPDATE tickets SET claimed_by = ? WHERE id = ?').run(un ? null : ctx.user.id, t.id);
+        await syncTicketMessage(ctx.guild, ticketOf(t.id, ctx.guild.id));
+        await ctx.ok(un ? `<@${ctx.user.id}> unclaimed this ticket.` : `<@${ctx.user.id}> claimed this ticket.`);
       },
     },
     add: {

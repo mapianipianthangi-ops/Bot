@@ -509,6 +509,8 @@ const MIGRATIONS = [
      message_id TEXT
    );
    CREATE INDEX idx_ticket_panels ON ticket_panels (guild_id);`,
+  // Several support roles per ticket category
+  `ALTER TABLE ticket_categories ADD COLUMN support_roles TEXT NOT NULL DEFAULT '[]';`,
 ];
 {
   const current = db.pragma('user_version', { simple: true });
@@ -2629,6 +2631,21 @@ const ticketCats = (gid) => db.prepare('SELECT * FROM ticket_categories WHERE gu
 const pad = (n) => String(n).padStart(4, '0');
 const catQuestions = (c) => { try { return JSON.parse(c.questions); } catch { return []; } };
 
+const MAX_SUPPORT_ROLES = 10;
+// Old single role still counts, so categories you already set up keep working.
+function catRoleIds(c) {
+  let ids = [];
+  try { ids = JSON.parse(c.support_roles || '[]'); } catch { ids = []; }
+  if (!ids.length && c.support_role) ids = [c.support_role];
+  return ids;
+}
+function catRoleSelect(guild, viewer, id, c) {
+  const m = new RoleSelectMenuBuilder().setCustomId(sid(viewer, 'tickets', 'role', id)).setPlaceholder('Support roles for this category (up to 10)').setMinValues(0).setMaxValues(MAX_SUPPORT_ROLES);
+  const have = catRoleIds(c).filter((r) => guild.roles.cache.has(r)).slice(0, MAX_SUPPORT_ROLES);
+  if (have.length) m.setDefaultRoles(...have);
+  return actionRow(m);
+}
+
 function ticketHome(guild, viewer) {
   const cats = ticketCats(guild.id), t = getSetting(guild.id, 'tickets', {});
   const e = panelEmbed(guild, 'Setup · Tickets').setDescription(cats.length
@@ -2651,7 +2668,7 @@ function ticketCatPanel(guild, viewer, id) {
   if (!c) throw new UserError('That category no longer exists.');
   const qs = catQuestions(c);
   const e = panelEmbed(guild, `Ticket category · ${c.name}`).setDescription(c.description || 'No description set.').addFields(
-    { name: 'Support role', value: c.support_role ? `<@&${c.support_role}>` : 'Not set', inline: true },
+    { name: catRoleIds(c).length === 1 ? 'Support role' : 'Support roles', value: catRoleIds(c).length ? catRoleIds(c).map((r) => `<@&${r}>`).join(' ') : 'Not set', inline: true },
     { name: 'Created under', value: c.parent_channel ? `<#${c.parent_channel}>` : 'No category', inline: true },
     { name: 'Open limit', value: `${c.max_open} per member`, inline: true },
     { name: 'Opening questions', value: qs.length ? qs.map((q, n) => `${n + 1}. ${q}`).join('\n') : 'None' },
@@ -2662,7 +2679,7 @@ function ticketCatPanel(guild, viewer, id) {
     embeds: [e],
     components: [
       actionRow(button(sid(viewer, 'tickets', 'detail', id), 'Details', ButtonStyle.Primary), button(sid(viewer, 'tickets', 'qs', id), 'Questions'), button(sid(viewer, 'tickets', 'del', id), 'Delete', ButtonStyle.Danger)),
-      actionRow(new RoleSelectMenuBuilder().setCustomId(sid(viewer, 'tickets', 'role', id)).setPlaceholder('Support role for this category').setMinValues(0).setMaxValues(1)),
+      catRoleSelect(guild, viewer, id, c),
       actionRow(new ChannelSelectMenuBuilder().setCustomId(sid(viewer, 'tickets', 'parent', id)).setPlaceholder('Create tickets under this channel category').setChannelTypes(ChannelType.GuildCategory).setMinValues(0).setMaxValues(1)),
       actionRow(button(sid(viewer, 'tickets', 'home'), 'Back')),
     ],
@@ -2732,7 +2749,7 @@ registerFeature('tickets', {
         textInput('close', 'Closing message', { long: true, max: 800, value: c.close_msg })]));
       case 'qs': return i.showModal(makeModal(mid(v, 'tickets', 'qs', id), 'Opening questions', [
         textInput('lines', 'One question per line (5 max, 45 chars)', { long: true, max: 400, value: catQuestions(c).join('\n') })]));
-      case 'role': db.prepare('UPDATE ticket_categories SET support_role = ? WHERE id = ?').run(i.values[0] || null, id); return show(id);
+      case 'role': db.prepare('UPDATE ticket_categories SET support_role = ?, support_roles = ? WHERE id = ?').run(i.values[0] || null, JSON.stringify(i.values), id); return show(id);
       case 'parent': db.prepare('UPDATE ticket_categories SET parent_channel = ? WHERE id = ?').run(i.values[0] || null, id); return show(id);
       case 'del': return i.update({
         embeds: [panelEmbed(g, `Delete ${c.name}?`).setDescription('The category is removed from the ticket panel. Existing tickets keep working.')],
@@ -2897,7 +2914,7 @@ async function extraPanelModal(i, action, args) {
 }
 
 const fillTicket = (t, user, c) => t.replaceAll('{user}', `<@${user.id}>`).replaceAll('{category}', c.name);
-const isStaffFor = (member, cat) => member.permissions.has(P.ManageChannels) || !!(cat && cat.support_role && member.roles.cache.has(cat.support_role));
+const isStaffFor = (member, cat) => member.permissions.has(P.ManageChannels) || !!(cat && catRoleIds(cat).some((r) => member.roles.cache.has(r)));
 async function createTicket(i, cat) {
   const g = i.guild, answers = i.__answers || [];
   const num = db.prepare('SELECT COALESCE(MAX(num), 0) + 1 AS n FROM tickets WHERE guild_id = ?').get(g.id).n;
@@ -2908,8 +2925,8 @@ async function createTicket(i, cat) {
     const base = [P.ViewChannel, P.SendMessages, P.ReadMessageHistory, P.AttachFiles, P.EmbedLinks];
     const overwrites = [{ id: g.id, deny: [P.ViewChannel] }, { id: i.user.id, allow: base },
       { id: g.members.me.id, allow: [...base, P.ManageChannels, P.ManageMessages] }];
-    const role = cat.support_role && g.roles.cache.get(cat.support_role);
-    if (role) overwrites.push({ id: role.id, allow: [...base, P.ManageMessages] });
+    const roles = catRoleIds(cat).map((r) => g.roles.cache.get(r)).filter(Boolean);
+    for (const role of roles) overwrites.push({ id: role.id, allow: [...base, P.ManageMessages] });
     const parent = cat.parent_channel && g.channels.cache.get(cat.parent_channel);
     const ch = await g.channels.create({
       name: `${slugify(cat.name) || 'ticket'}-${pad(num)}`.slice(0, 100), type: ChannelType.GuildText, parent: parent ? parent.id : undefined,
@@ -2921,9 +2938,9 @@ async function createTicket(i, cat) {
       .setFooter({ text: `${FOOTER} · Ticket ${pad(num)}` });
     catQuestions(cat).forEach((q, n) => { if (answers[n]) e.addFields({ name: clip(q, 256), value: clip(answers[n], 1000) }); });
     await ch.send({
-      content: `<@${i.user.id}>${role ? ` <@&${role.id}>` : ''}`, embeds: [e],
+      content: `<@${i.user.id}>${roles.map((r) => ` <@&${r.id}>`).join('')}`, embeds: [e],
       components: [actionRow(button(`tk:close:${tid}`, 'Close', ButtonStyle.Danger), button(`tk:claim:${tid}`, 'Claim'))],
-      allowedMentions: { users: [i.user.id], roles: role ? [role.id] : [] },
+      allowedMentions: { users: [i.user.id], roles: roles.map((r) => r.id) },
     });
     return ch;
   } catch (err) {

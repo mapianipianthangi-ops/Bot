@@ -1646,7 +1646,7 @@ function discoverPayload(guildId, userId, cat, member) {
   if (ms.enabled === false) throw new UserError('Discovery is switched off in this server.');
   const pk = perksOf(guildId, member);
   checkCooldown(userId, pk && pk.cooldown !== undefined ? pk.cooldown : (ms.cooldown === undefined ? 30 : ms.cooldown));
-  const item = pickLucky(guildId, cat, pk ? pk.luck : 0);
+  const item = pickLucky(guildId, cat, pk ? pk.luck : 0, pk ? pk.min : 0);
   const rec = recordDiscovery(guildId, userId, item);
   const gain = rec.qty === 1 ? earn(guildId, member, econ(guildId).discovery_coins || 0) : 0;
   const note = (rec.qty > 1 ? `Duplicate · you now hold ${rec.qty}` : `New discovery · ${rec.unique} in your collection`) + (gain ? ` · +${gain} ${coinName(guildId)}` : '');
@@ -5162,15 +5162,28 @@ simpleFeature('highrank', {
     { k: 'coin_boost', label: 'Coin earning boost', type: 'number', min: 100, max: 500, def: 100, unit: '% of normal' },
     { k: 'cooldown', label: 'Discovery cooldown', type: 'number', min: 0, max: 3600, unit: 'seconds' },
     { k: 'vault', label: 'Vault access', type: 'toggle', def: true },
+    { k: 'min_rarity', label: 'Lowest rarity high ranks discover', type: 'number', min: 0, max: 6, def: 0, hint: '0 Common, 1 Uncommon, 2 Rare, 3 Epic, 4 Legendary, 5 Mythical, 6 Forbidden' },
     { k: 'mythic_roles', label: 'Roles that can claim mythics', type: 'roles', max: 5, hint: 'Administrators can always use /mythic' },
   ],
 });
 function perksOf(gid, member) {
   const h = getSetting(gid, 'highrank', {});
   if (!member || !member.roles || !(h.roles || []).some((r) => member.roles.cache.has(r))) return null;
-  return { luck: h.luck ?? 0, coin: h.coin_boost ?? 100, cooldown: h.cooldown, vault: h.vault !== false };
+  return { luck: h.luck ?? 0, coin: h.coin_boost ?? 100, cooldown: h.cooldown, vault: h.vault !== false, min: h.min_rarity ?? 0 };
 }
-function pickLucky(gid, cat, luck) {
+function pickAtLeast(gid, cat, minRank) {
+  const scope = cat || 'all', cust = customItems(gid).filter((x) => !cat || x.cat === cat), tiers = [];
+  for (let k = minRank; k < RARITIES.length; k++) {
+    const pool = [...(POOL[`${scope}|${RARITIES[k]}`] || []), ...cust.filter((x) => x.rarity === RARITIES[k])];
+    if (pool.length) tiers.push({ pool, w: DROP_RATES[k] });
+  }
+  if (!tiers.length) return null;
+  let r = Math.random() * tiers.reduce((s, x) => s + x.w, 0);
+  for (const x of tiers) { r -= x.w; if (r < 0) return randomOf(x.pool); }
+  return randomOf(tiers[tiers.length - 1].pool);
+}
+function pickLucky(gid, cat, luck, minRank = 0) {
+  if (minRank > 0) { const f = pickAtLeast(gid, cat, minRank); if (f) return f; }
   let item = pickDiscoveryFor(gid, cat);
   if (luck > 0 && Math.random() * 100 < luck) { const b = pickDiscoveryFor(gid, cat); if (RARITIES.indexOf(b.rarity) > RARITIES.indexOf(item.rarity)) item = b; }
   return item;

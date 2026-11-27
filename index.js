@@ -1656,20 +1656,40 @@ function fortunePayload(cfg, userId) {
   checkCooldown(userId);
   return { embeds: [embed(cfg, randomOf(FORTUNES)).setTitle('Fortune')], components: [againRow(userId, 'fortune')] };
 }
-const discoverRun = (ctx, cat) => ctx.reply(cat === 'fortune'
-  ? fortunePayload(ctx.cfg, ctx.user.id)
-  : discoverPayload(ctx.guild.id, ctx.user.id, cat || null, ctx.member));
+// Free choice: administrators and the roles chosen in /setup highrank can name the exact entry they want (no cooldown)
+const canPickAny = (ctx) => ctx.member.permissions.has(P.Administrator) || (getSetting(ctx.guild.id, 'highrank', {}).mythic_roles || []).some((r) => ctx.member.roles.cache.has(r));
+function findEntry(gid, name, cat) {
+  const q = String(name).trim().toLowerCase(), all = [...LIB.values(), ...customItems(gid)].filter((x) => !cat || x.cat === cat);
+  return all.find((x) => x.name.toLowerCase() === q) || all.find((x) => x.name.toLowerCase().includes(q)) || null;
+}
+const discoverRun = (ctx, cat, entry) => {
+  if (entry) {
+    if (!canPickAny(ctx)) throw new UserError('Only administrators and the roles chosen in /setup highrank can pick an entry.');
+    const item = findEntry(ctx.guild.id, entry, cat && cat !== 'fortune' ? cat : null);
+    if (!item) throw new UserError(`No entry matching "${entry}" was found${cat && cat !== 'fortune' ? ' in that category' : ''}.`);
+    const rec = recordDiscovery(ctx.guild.id, ctx.user.id, item);
+    return ctx.reply({ embeds: [itemEmbed(item, `Chosen entry${rec.qty > 1 ? ` · duplicate, you hold ${rec.qty}` : ' · new discovery'}`)], components: [againRow(ctx.user.id, cat)] });
+  }
+  return ctx.reply(cat === 'fortune'
+    ? fortunePayload(ctx.cfg, ctx.user.id)
+    : discoverPayload(ctx.guild.id, ctx.user.id, cat || null, ctx.member));
+};
 
 define({
   name: 'discover', description: 'Discover something from the magical archives', category: 'Discovery',
-  options: [opt('string', 'category', 'What to discover (random if omitted)', false, { choices: CAT_CHOICES })],
-  run: (ctx, a) => discoverRun(ctx, a.category),
+  options: [opt('string', 'category', 'What to discover (random if omitted)', false, { choices: CAT_CHOICES }),
+    opt('string', 'entry', 'Pick an exact entry (administrators and chosen roles only)', false, { rest: true, maxLength: 100 })],
+  run: (ctx, a) => discoverRun(ctx, a.category, a.entry),
 });
 for (const [name, cat, description] of [
   ['spell', 'spell', 'Discover a random spell'], ['potion', 'potion', 'Discover a random potion'],
   ['summon', 'creature', 'Summon a magical creature'], ['prophecy', 'prophecy', 'Receive a mysterious prophecy'],
   ['fortune', 'fortune', 'Receive a magical fortune'],
-]) define({ name, description, category: 'Magic', run: (ctx) => discoverRun(ctx, cat) });
+]) define({
+  name, description, category: 'Magic',
+  ...(cat === 'fortune' ? {} : { options: [opt('string', 'entry', 'Pick an exact entry (administrators and chosen roles only)', false, { rest: true, maxLength: 100 })] }),
+  run: (ctx, a) => discoverRun(ctx, cat, a && a.entry),
+});
 
 define({
   name: 'crystalball', description: 'Gaze into the crystal ball', category: 'Magic',
@@ -5163,7 +5183,7 @@ simpleFeature('highrank', {
     { k: 'cooldown', label: 'Discovery cooldown', type: 'number', min: 0, max: 3600, unit: 'seconds' },
     { k: 'vault', label: 'Vault access', type: 'toggle', def: true },
     { k: 'min_rarity', label: 'Lowest rarity high ranks discover', type: 'number', min: 0, max: 6, def: 0, hint: '0 Common, 1 Uncommon, 2 Rare, 3 Epic, 4 Legendary, 5 Mythical, 6 Forbidden' },
-    { k: 'mythic_roles', label: 'Roles that can claim mythics', type: 'roles', max: 5, hint: 'Administrators can always use /mythic' },
+    { k: 'mythic_roles', label: 'Roles that can claim mythics and pick entries', type: 'roles', max: 5, hint: 'Administrators can always use /mythic and pick any entry' },
   ],
 });
 function perksOf(gid, member) {

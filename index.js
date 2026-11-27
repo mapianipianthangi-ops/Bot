@@ -1657,14 +1657,14 @@ function fortunePayload(cfg, userId) {
   return { embeds: [embed(cfg, randomOf(FORTUNES)).setTitle('Fortune')], components: [againRow(userId, 'fortune')] };
 }
 // Free choice: administrators and the roles chosen in /setup highrank can name the exact entry they want (no cooldown)
-const canPickAny = (ctx) => ctx.member.permissions.has(P.Administrator) || (getSetting(ctx.guild.id, 'highrank', {}).mythic_roles || []).some((r) => ctx.member.roles.cache.has(r));
+const canPickAny = (ctx) => ctx.member.permissions.has(P.Administrator) || !!perksOf(ctx.guild.id, ctx.member) || (getSetting(ctx.guild.id, 'highrank', {}).mythic_roles || []).some((r) => ctx.member.roles.cache.has(r));
 function findEntry(gid, name, cat) {
   const q = String(name).trim().toLowerCase(), all = [...LIB.values(), ...customItems(gid)].filter((x) => !cat || x.cat === cat);
   return all.find((x) => x.name.toLowerCase() === q) || all.find((x) => x.name.toLowerCase().includes(q)) || null;
 }
 const discoverRun = (ctx, cat, entry) => {
   if (entry) {
-    if (!canPickAny(ctx)) throw new UserError('Only administrators and the roles chosen in /setup highrank can pick an entry.');
+    if (!canPickAny(ctx)) throw new UserError('Only high ranks and administrators can pick an entry.');
     const item = findEntry(ctx.guild.id, entry, cat && cat !== 'fortune' ? cat : null);
     if (!item) throw new UserError(`No entry matching "${entry}" was found${cat && cat !== 'fortune' ? ' in that category' : ''}.`);
     const rec = recordDiscovery(ctx.guild.id, ctx.user.id, item);
@@ -5320,6 +5320,28 @@ define({
     if (!pool.length) throw new UserError('There is no Mythical entry in that category yet. Try another category or leave it empty.');
     const item = randomOf(pool), rec = recordDiscovery(gid, ctx.user.id, item);
     await ctx.reply({ embeds: [itemEmbed(item, `Mythic claim${rec.qty > 1 ? ` · duplicate, you hold ${rec.qty}` : ' · new discovery'}`)], components: [actionRow(button(`dc:${ctx.user.id}`, 'My collection'))] });
+  },
+});
+
+// /give: high ranks (and administrators) can give any entry, from Common to Forbidden, in any category, to any member
+define({
+  name: 'give', description: 'Give any discovery entry to a member (high ranks only)', category: 'Magic',
+  options: [
+    opt('user', 'member', 'Who receives it', true),
+    opt('string', 'category', 'Narrow the search to one category', false, { choices: Object.keys(CATS) }),
+    opt('string', 'entry', 'Name of the entry (part of the name works)', true, { rest: true, maxLength: 100 }),
+  ],
+  async run(ctx, a) {
+    if (!canPickAny(ctx)) throw new UserError('Only high ranks and administrators can use /give.');
+    const target = await requireMember(ctx, a.member);
+    if (target.user.bot) throw new UserError('Bots do not have a collection.');
+    const item = findEntry(ctx.guild.id, a.entry, a.category || null);
+    if (!item) throw new UserError(`No entry matching "${a.entry}" was found${a.category ? ' in that category' : ''}.`);
+    const rec = recordDiscovery(ctx.guild.id, target.id, item);
+    await ctx.reply({ embeds: [
+      embed(ctx.cfg, `<@${target.id}> received **${item.name}** from <@${ctx.user.id}>.`),
+      itemEmbed(item, rec.qty > 1 ? `Duplicate, now holds ${rec.qty}` : 'New entry in their collection'),
+    ] });
   },
 });
 

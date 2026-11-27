@@ -1711,6 +1711,7 @@ define({
 
 // Collection and codex browsers. All state lives in the component ids, so panels keep working after restarts.
 const PAGE_SIZE = 8;
+const CODEX_PAGE_SIZE = 15; // /codex name lists: more names per page, still short enough to read at a glance
 const SORT_LABEL = { c: { n: 'Newest first', x: 'Rarest first' }, x: { n: 'A to Z', x: 'Rarest first' } };
 const browseId = (kind, st, over = {}) => {
   const s = { ...st, ...over };
@@ -1733,9 +1734,10 @@ async function renderBrowser(st) {
   if (st.sort === 'x') entries.sort((a, b) => rank(b.rarity) - rank(a.rarity) || a.name.localeCompare(b.name));
   else if (codex) entries.sort((a, b) => a.name.localeCompare(b.name));
   else entries.sort((a, b) => b.at - a.at);
-  const pages = Math.max(1, Math.ceil(entries.length / PAGE_SIZE));
+  const size = codex ? CODEX_PAGE_SIZE : PAGE_SIZE;
+  const pages = Math.max(1, Math.ceil(entries.length / size));
   const page = Math.min(Math.max(0, st.page), pages - 1);
-  const slice = entries.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const slice = entries.slice(page * size, (page + 1) * size);
   const cur = { ...st, page };
 
   const e = embed(getConfig(st.guildId)).setFooter({ text: `${FOOTER} · Page ${page + 1} of ${pages}` });
@@ -5328,8 +5330,8 @@ define({
   name: 'give', description: 'Give any discovery entry to a member (high ranks only)', category: 'Magic',
   options: [
     opt('user', 'member', 'Who receives it', true),
-    opt('string', 'category', 'Narrow the search to one category', false, { choices: Object.keys(CATS) }),
     opt('string', 'entry', 'Name of the entry (part of the name works)', true, { rest: true, maxLength: 100 }),
+    opt('string', 'category', 'Narrow the search to one category', false, { choices: Object.keys(CATS) }),
   ],
   async run(ctx, a) {
     if (!canPickAny(ctx)) throw new UserError('Only high ranks and administrators can use /give.');
